@@ -143,6 +143,9 @@ void sendHomeassistantDiscovery()
     obj["state_topic"] = state_topic;
     obj["unique_id"] = unique_id;
 
+    // set qos to 0
+    obj["qos"] = 0;
+
     // availability
     obj["availability_topic"] = "r3deskctrl/status";
     obj["payload_available"] = "online";
