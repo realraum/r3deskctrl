@@ -25,6 +25,11 @@
 #define MQTT_WILL_QOS 1
 #define MQTT_MAX_HEADER_SIZE 10
 
+// led
+#define LED_BUILTIN 2 // Pin number for the built-in LED
+#define BUILTIN_LED_ON LOW
+#define BUILTIN_LED_OFF HIGH
+
 // buttons
 #define MAX_BUTTONS 6
 
@@ -42,29 +47,43 @@ WiFiClient espClient;
 PubSubClient client{espClient};
 wl_status_t wifiStatus;
 
+uint32_t lastMqttReconnectAttempt{0}; // if not connected to mqtt for more than 5 minutes, reboot
+uint32_t lastForceButtonStatePublish{0}; // force publish button unpressed state every 10 seconds so not to hang in case of mqtt issues
+uint32_t lastMqttStatusPublish{0};
+
 // mqtt
 bool mqttConnected{false};
+bool lastMqttConnected{false};
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
 void setup()
 {
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, BUILTIN_LED_OFF); // turn off led
+
   esp_log_level_set("*", ESP_LOG_INFO);        // set all components to ERROR level
   Serial.begin(115200);
 
-  delay(100);
+  delay(1000);
 
   Serial.println("Starting up...");
 
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   WiFi.setHostname(HOSTNAME);
-  WiFi.setAutoReconnect(false);
-  WiFi.persistent(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(true);
 
-  Serial.printf("Connecting to WiFi %s...\n", WIFI_SSID);
+  Serial.printf("Connecting to WiFi %s...", WIFI_SSID);
 
-  while (WiFi.status() != WL_CONNECTED)
+  wl_status_t status = WiFi.status();
+
+  while (!WiFi.isConnected())
   {
-    delay(100);
+    if (status != WiFi.status())
+    {
+      status = WiFi.status();
+      Serial.printf("\nWiFi status: %d\n", status);
+    }
 
     // if millis() is greater than 1 minute, reboot
     if (millis() > 60000)
@@ -73,7 +92,11 @@ void setup()
       ESP.restart();
       return;
     }
+
+    delay(10);
   }
+
+  Serial.println("Connected to WiFi");
 
   if (!MDNS.begin(HOSTNAME))
   {
@@ -108,7 +131,7 @@ void publishButtonState(int buttonIndex, bool pressed)
   std::string topic = "r3deskctrl/button/" + std::to_string(buttonIndex);
   std::string payload = pressed ? "pressed" : "released";
 
-  Serial.printf("Publishing to topic %s: %s\n", topic.c_str(), payload.c_str());
+  // Serial.printf("Publishing to topic %s: %s\n", topic.c_str(), payload.c_str());
 
   if (client.publish(topic.c_str(), payload.c_str()) == false)
   {
@@ -116,7 +139,7 @@ void publishButtonState(int buttonIndex, bool pressed)
   }
   else
   {
-    Serial.printf("Published button %d state\n", buttonIndex);
+    // Serial.printf("Published button %d state\n", buttonIndex);
   }
 }
 
@@ -126,7 +149,25 @@ void sendHomeassistantDiscovery()
 
   Serial.println("Sending Home Assistant discovery messages...");
 
-  auto createButton = [&](const int buttonIndex){
+  const auto setBasicInformation = [&](JsonObject &obj){
+    // set qos to 0
+    obj["qos"] = 0;
+
+    // availability
+    obj["availability_topic"] = "r3deskctrl/status";
+    obj["payload_available"] = "online";
+    obj["payload_not_available"] = "offline";
+    
+    obj["device"]["identifiers"] = WiFi.macAddress();
+    obj["device"]["name"] = HOSTNAME;
+    obj["device"]["model"] = "ESP32";
+    obj["device"]["manufacturer"] = "realraum";
+
+    // also include the software version from git
+    obj["device"]["sw_version"] = std::string(GIT_HASH) + (std::string(GIT_DIRTY) == "dirty" ? "-dirty" : "");
+  };
+
+  const auto createButton = [&](const int buttonIndex){
     doc.clear();
 
     std::string topic = "homeassistant/binary_sensor/r3deskctrl_button" + std::to_string(buttonIndex) + "/config";
@@ -143,21 +184,7 @@ void sendHomeassistantDiscovery()
     obj["state_topic"] = state_topic;
     obj["unique_id"] = unique_id;
 
-    // set qos to 0
-    obj["qos"] = 0;
-
-    // availability
-    obj["availability_topic"] = "r3deskctrl/status";
-    obj["payload_available"] = "online";
-    obj["payload_not_available"] = "offline";
-    
-    obj["device"]["identifiers"] = WiFi.macAddress();
-    obj["device"]["name"] = HOSTNAME;
-    obj["device"]["model"] = "ESP32";
-    obj["device"]["manufacturer"] = "realraum";
-
-    // also include the software version from git
-    obj["device"]["sw_version"] = std::string(GIT_HASH) + (std::string(GIT_DIRTY) == "dirty" ? "-dirty" : "");
+    setBasicInformation(obj);
 
     std::string payload;
     if (serializeJson(doc, payload) == 0)
@@ -197,11 +224,38 @@ void loop()
     return;
   }
 
+  if (lastMqttConnected != mqttConnected)
+  {
+    lastMqttConnected = mqttConnected;
+    // show mqtt connection status via builtin led
+    if (mqttConnected)
+    {
+      Serial.println("MQTT connected, turning on builtin led");
+      digitalWrite(LED_BUILTIN, BUILTIN_LED_ON); // turn on led
+    }
+    else
+    {
+      Serial.println("MQTT not connected, turning off builtin led");
+      digitalWrite(LED_BUILTIN, BUILTIN_LED_OFF); // turn off led
+    }
+  }
+
   if (!client.connected())
   {
+    lastMqttStatusPublish = 0;
+
+    // if we have not been able to connect to mqtt for more than 5 minutes, reboot
+    if (lastMqttReconnectAttempt != 0 && (millis() - lastMqttReconnectAttempt) > 1000 * 60 * 5)
+    {
+      Serial.println("Rebooting...");
+      ESP.restart();
+      return;
+    }
+
     Serial.println("MQTT not connected, trying to connect...");
     if (client.connect(HOSTNAME, MQTT_WILL_TOPIC, MQTT_WILL_QOS, MQTT_WILL_RETAIN, MQTT_WILL_PAYLOAD))
     {
+      lastMqttReconnectAttempt = 0;
       Serial.println("MQTT connected");
       mqttConnected = true;
       client.publish("r3deskctrl/status", "online", true);
@@ -218,6 +272,8 @@ void loop()
       Serial.print("failed, rc=");
       Serial.print(client.state());
       Serial.println(" try again in 5 seconds");
+      mqttConnected = false;
+      lastMqttReconnectAttempt = millis();
       // Wait 5 seconds before retrying
       delay(5000);
       return;
@@ -254,6 +310,43 @@ void loop()
     }
 
     lastButtonStates[i] = reading;
+  }
+
+  // check if we need to force publish button states
+  if ((millis() - lastForceButtonStatePublish) > 10000)
+  {
+    lastForceButtonStatePublish = millis();
+    for (int i = 0; i < MAX_BUTTONS; i++)
+    {
+      if (buttonStates[i] == BUTTON_RELEASED)
+      {
+        publishButtonState(i, false);
+      }
+    }
+  }
+
+  // publish mqtt status every 10 seconds
+  if (mqttConnected && (millis() - lastMqttStatusPublish) > 10000)
+  {
+    lastMqttStatusPublish = millis();
+
+    JsonDocument doc;
+    doc["ip"] = WiFi.localIP().toString();
+    doc["rssi"] = WiFi.RSSI();
+
+    std::string payload;
+
+    if (serializeJson(doc, payload) != 0)
+    {
+      if (client.publish("r3deskctrl/status_json", payload.c_str(), true) == false)
+      {
+        Serial.println("Failed to publish mqtt status");
+      }
+      else
+      {
+        Serial.println("Published mqtt status json");
+      }
+    }
   }
 }
 
