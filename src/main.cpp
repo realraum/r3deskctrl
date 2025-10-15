@@ -345,7 +345,17 @@ void loop()
                             Serial.println("Rebooting..."); });
     httpUpdate.onProgress([](unsigned int progress, unsigned int total)
                           { 
-                                // print
+                                // print every percent
+                                if (total > 0) {
+                                    int percent = (progress * 100) / total;
+                                    Serial.printf("OTA Progress: %u%% (%u/%u)\n", percent, progress, total);
+                                } else {
+                                    Serial.printf("OTA Progress: %u bytes received\n", progress);
+                                }
+
+                                // blink builtin led while ota is in progress depending on millis
+                                digitalWrite(LED_BUILTIN, (millis() / 100) % 2 == 0 ? BUILTIN_LED_ON : BUILTIN_LED_OFF);
+
                                 otaInProgress = true; });
     httpUpdate.onError([](int err)
                        {
