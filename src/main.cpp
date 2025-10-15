@@ -341,6 +341,7 @@ void loop()
     httpUpdate.onEnd([]()
                      {
                              otaInProgress = false;
+                             digitalWrite(LED_BUILTIN, BUILTIN_LED_ON);
                              Serial.println("OTA Update End"); 
                             Serial.println("Rebooting..."); });
     httpUpdate.onProgress([](unsigned int progress, unsigned int total)
