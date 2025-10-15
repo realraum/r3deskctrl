@@ -114,7 +114,7 @@ void setup()
   // Setup MQTT
   client.setServer(MQTT_SERVER, MQTT_PORT);
   client.setCallback(mqttCallback);
-  client.setBufferSize(512);
+  client.setBufferSize(1024); // oida warum muss des so groß sein
 
   // setup buttons
   for (int i = 0; i < MAX_BUTTONS; i++)
@@ -213,6 +213,72 @@ void sendHomeassistantDiscovery()
   {
     createButton(i);
   }
+
+  // publish discovery for diagnostic status (r3deskctrl/status_json, {"ip": "192.168.x.x", "rssi": -xx})
+  doc.clear();
+  auto obj = doc.to<JsonObject>();
+  obj["name"] = "IP Address";
+  obj["icon"] = "mdi:ip";
+  obj["state_topic"] = "r3deskctrl/status_json";
+  obj["value_template"] = "{{ value_json.ip }}";
+  obj["unique_id"] = "r3deskctrl_ip";
+  obj["json_attributes_topic"] = "r3deskctrl/status_json";
+  obj["entity_category"] = "diagnostic";
+  setBasicInformation(obj);
+
+  std::string payload;
+  if (serializeJson(doc, payload) == 0)
+  {
+    Serial.println("Failed to serialize JSON");
+    return;
+  }
+
+  std::string topic = "homeassistant/sensor/r3deskctrl/ip/config";
+  Serial.print("Publishing discovery for IP address to topic ");
+  Serial.println(topic.c_str());
+  Serial.println(payload.c_str());
+  if (client.publish(topic.c_str(), payload.c_str(), true) == false)
+  {
+    Serial.println("Failed to publish discovery for IP address");
+  }
+  else
+  {
+    Serial.println("Published discovery for IP address");
+  }
+
+  doc.clear();
+  obj = doc.to<JsonObject>();
+  obj["name"] = "WiFi RSSI";
+  obj["icon"] = "mdi:wifi";
+  obj["state_topic"] = "r3deskctrl/status_json";
+  obj["value_template"] = "{{ value_json.rssi }}";
+  obj["unique_id"] = "r3deskctrl_rssi";
+  obj["unit_of_measurement"] = "dBm";
+  obj["device_class"] = "signal_strength";
+  obj["entity_category"] = "diagnostic";
+  setBasicInformation(obj);
+
+  payload.clear();
+  if (serializeJson(doc, payload) == 0)
+  {
+    Serial.println("Failed to serialize JSON");
+    return;
+  }
+
+  topic = "homeassistant/sensor/r3deskctrl/rssi/config";
+  Serial.print("Publishing discovery for WiFi RSSI to topic ");
+  Serial.println(topic.c_str());
+  Serial.println(payload.c_str());
+  if (client.publish(topic.c_str(), payload.c_str(), true) == false)
+  {
+    Serial.println("Failed to publish discovery for WiFi RSSI");
+  }
+  else
+  {
+    Serial.println("Published discovery for WiFi RSSI");
+  }
+
+  Serial.println("Home Assistant discovery messages sent.");
 }
 
 void loop()
