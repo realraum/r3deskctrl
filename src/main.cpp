@@ -4,6 +4,20 @@
 #error This code is intended to run on the ESP32 platform!
 #endif
 
+// Secrets
+#ifndef OTA_PASSWORD
+#define OTA_PASSWORD "Password_123" // default, should be overridden in build flags
+#warning "OTA_PASSWORD not defined, using default 'Password_123'"
+#endif
+#ifndef AP_PASSWORD
+#define AP_PASSWORD "Password_123" // default, should be overridden in build flags
+#warning "AP_PASSWORD not defined, using default 'Password_123'"
+#endif
+#ifndef API_KEY
+#define API_KEY "Password_123" // default, should be overridden in build flags
+#warning "API_KEY not defined, using default 'Password_123'"
+#endif
+
 // system includes
 #include <string>
 
@@ -11,10 +25,14 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <ESPmDNS.h>
+#include <HTTPUpdate.h>
 
 // 3rdparty lib includes
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#include <WiFiManager.h>
+
+WiFiManager wm;
 
 #define HOSTNAME "r3deskctrl"
 #define MQTT_SERVER "mqtt.realraum.at"
@@ -24,6 +42,9 @@
 #define MQTT_WILL_RETAIN true
 #define MQTT_WILL_QOS 1
 #define MQTT_MAX_HEADER_SIZE 10
+
+// Base Hostname
+constexpr const char baseHostname[] = "r3deskctrl-";
 
 // led
 #define LED_BUILTIN 2 // Pin number for the built-in LED
@@ -38,6 +59,11 @@
 
 #define DEBOUNCE_DELAY 50 // milliseconds
 
+// ota
+uint64_t lastOtaTime = 0;
+bool otaInProgress = false;
+bool hasTriedOta = false;
+
 const int buttonPins[MAX_BUTTONS] = {13, 14, 27, 26, 25, 33};
 bool buttonStates[MAX_BUTTONS] = {BUTTON_RELEASED, BUTTON_RELEASED, BUTTON_RELEASED, BUTTON_RELEASED, BUTTON_RELEASED, BUTTON_RELEASED};
 bool lastButtonStates[MAX_BUTTONS] = {BUTTON_RELEASED, BUTTON_RELEASED, BUTTON_RELEASED, BUTTON_RELEASED, BUTTON_RELEASED, BUTTON_RELEASED};
@@ -47,56 +73,73 @@ WiFiClient espClient;
 PubSubClient client{espClient};
 wl_status_t wifiStatus;
 
-uint32_t lastMqttReconnectAttempt{0}; // if not connected to mqtt for more than 5 minutes, reboot
+uint32_t lastMqttReconnectAttempt{0};    // if not connected to mqtt for more than 5 minutes, reboot
 uint32_t lastForceButtonStatePublish{0}; // force publish button unpressed state every 10 seconds so not to hang in case of mqtt issues
 uint32_t lastMqttStatusPublish{0};
 
 // mqtt
 bool mqttConnected{false};
 bool lastMqttConnected{false};
-void mqttCallback(char* topic, byte* payload, unsigned int length);
+void mqttCallback(char *topic, byte *payload, unsigned int length);
+
+String generateHostname()
+{
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  char uniquePart[7]; // 6 characters + null terminator
+  snprintf(uniquePart, sizeof(uniquePart), "%02X%02X%02X", mac[3], mac[4], mac[5]);
+  return String(baseHostname) + String(uniquePart);
+}
 
 void setup()
 {
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, BUILTIN_LED_OFF); // turn off led
 
-  esp_log_level_set("*", ESP_LOG_INFO);        // set all components to ERROR level
+  esp_log_level_set("*", ESP_LOG_INFO); // set all components to ERROR level
   Serial.begin(115200);
 
   delay(1000);
 
   Serial.println("Starting up...");
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  WiFi.setHostname(HOSTNAME);
-  WiFi.setAutoReconnect(true);
-  WiFi.persistent(true);
+  WiFi.STA.begin(false); // Only initialize so we can get the MAC address
 
-  Serial.printf("Connecting to WiFi %s...", WIFI_SSID);
-
-  wl_status_t status = WiFi.status();
-
-  while (!WiFi.isConnected())
+  // Generate and set the unique hostname
+  String hostname = generateHostname();
+  if (WiFi.setHostname(hostname.c_str()))
   {
-    if (status != WiFi.status())
-    {
-      status = WiFi.status();
-      Serial.printf("\nWiFi status: %d\n", status);
-    }
-
-    // if millis() is greater than 1 minute, reboot
-    if (millis() > 60000)
-    {
-      Serial.println("Rebooting...");
-      ESP.restart();
-      return;
-    }
-
-    delay(10);
+    Serial.print("Hostname set to: ");
+    Serial.println(hostname);
+  }
+  else
+  {
+    Serial.println("Failed to set hostname");
   }
 
-  Serial.println("Connected to WiFi");
+  WiFi.mode(WIFI_AP_STA);
+
+  wm.setDebugOutput(true);
+  wm.setConfigPortalBlocking(false); // Non-blocking, so we can do other stuff in loop
+  wm.setCaptivePortalEnable(true);
+  wm.setAPClientCheck(true);
+  wm.setWebPortalClientCheck(true);
+  wm.setWiFiAutoReconnect(true);
+  wm.setCleanConnect(true);
+  wm.setShowInfoUpdate(false);
+
+  bool res = wm.autoConnect(hostname.c_str(), AP_PASSWORD);
+
+  if (!res)
+  {
+    Serial.println("Failed to connect and hit timeout");
+  }
+  else
+  {
+    Serial.println("Connected to WiFi!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+  }
 
   if (!MDNS.begin(HOSTNAME))
   {
@@ -149,7 +192,8 @@ void sendHomeassistantDiscovery()
 
   Serial.println("Sending Home Assistant discovery messages...");
 
-  const auto setBasicInformation = [&](JsonObject &obj){
+  const auto setBasicInformation = [&](JsonObject &obj)
+  {
     // set qos to 0
     obj["qos"] = 0;
 
@@ -157,7 +201,7 @@ void sendHomeassistantDiscovery()
     obj["availability_topic"] = "r3deskctrl/status";
     obj["payload_available"] = "online";
     obj["payload_not_available"] = "offline";
-    
+
     obj["device"]["identifiers"] = WiFi.macAddress();
     obj["device"]["name"] = HOSTNAME;
     obj["device"]["model"] = "ESP32";
@@ -167,7 +211,8 @@ void sendHomeassistantDiscovery()
     obj["device"]["sw_version"] = std::string(GIT_HASH) + (std::string(GIT_DIRTY) == "dirty" ? "-dirty" : "");
   };
 
-  const auto createButton = [&](const int buttonIndex){
+  const auto createButton = [&](const int buttonIndex)
+  {
     doc.clear();
 
     std::string topic = "homeassistant/binary_sensor/r3deskctrl_button" + std::to_string(buttonIndex) + "/config";
@@ -176,7 +221,7 @@ void sendHomeassistantDiscovery()
     std::string state_topic = "r3deskctrl/button/" + std::to_string(buttonIndex);
 
     auto obj = doc.to<JsonObject>();
-    
+
     obj["name"] = name;
     obj["icon"] = "mdi:gesture-tap-button";
     obj["payload_on"] = "pressed";
@@ -283,6 +328,54 @@ void sendHomeassistantDiscovery()
 
 void loop()
 {
+  if (WiFi.status() == WL_CONNECTED && !hasTriedOta)
+  {
+    hasTriedOta = true;
+    NetworkClient client;
+    Serial.println("Checking for OTA update...");
+    httpUpdate.onStart([]()
+                       {
+                               otaInProgress = true;
+                               Serial.println("OTA Update Start");    
+                               lastOtaTime = millis(); });
+    httpUpdate.onEnd([]()
+                     {
+                             otaInProgress = false;
+                             Serial.println("OTA Update End"); 
+                            Serial.println("Rebooting..."); });
+    httpUpdate.onProgress([](unsigned int progress, unsigned int total)
+                          { 
+                                // print
+                                otaInProgress = true; });
+    httpUpdate.onError([](int err)
+                       {
+                              otaInProgress = false;
+                              Serial.printf("OTA Error: %d - %s\n", err, httpUpdate.getLastErrorString().c_str()); 
+                              delay(2000);
+                              ESP.restart(); });
+
+    t_httpUpdate_return ret = httpUpdate.update(client, "http://" OTA_SERVER_BASE_URL "/api/v1/firmware/latest?device_type=esp32dev", GIT_HASH, [](HTTPClient *client)
+                                                {
+            client->setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+            client->addHeader("X-Api-Key", OTA_PASSWORD); });
+    switch (ret)
+    {
+    case HTTP_UPDATE_FAILED:
+      Serial.printf("HTTP_UPDATE_FAILED Error (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+      break;
+
+    case HTTP_UPDATE_NO_UPDATES:
+      Serial.println("HTTP_UPDATE_NO_UPDATES");
+      break;
+
+    case HTTP_UPDATE_OK:
+      Serial.println("HTTP_UPDATE_OK");
+      break;
+    }
+  }
+
+  wm.process();
+
   if (!WiFi.isConnected())
   {
     Serial.println("WiFi not connected!");
@@ -416,7 +509,7 @@ void loop()
   }
 }
 
-void mqttCallback(char* topic, byte* payload, unsigned int length)
+void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
   Serial.print("Message arrived [");
   Serial.print(topic);
