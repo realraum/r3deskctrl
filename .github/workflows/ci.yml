@@ -36,10 +36,10 @@ jobs:
       - name: Show PlatformIO info
         run: pio --version && pio system info
 
-      - name: Create secrets.env file
+      - name: Create .env file
         run: |
-          echo "OTA_PASSWORD=${{ secrets.OTA_SERVER_UPLOAD_KEY }}" >> secrets.env
-          echo "OTA_SERVER_BASE_URL=${{ secrets.OTA_SERVER_BASE_URL }}" >> secrets.env
+          echo "OTA_PASSWORD=${{ secrets.OTA_SERVER_UPLOAD_KEY }}" >> .env
+          echo "OTA_SERVER_BASE_URL=${{ secrets.OTA_SERVER_BASE_URL }}" >> .env
 
       - name: Build ESP Firmware
         run: |
