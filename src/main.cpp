@@ -385,29 +385,16 @@ void loop()
     }
   }
 
+  digitalWrite(LED_BUILTIN, mqttConnected ? BUILTIN_LED_ON : BUILTIN_LED_OFF);
+
   wm.process();
 
   if (!WiFi.isConnected())
   {
+    mqttConnected = false;
     Serial.println("WiFi not connected!");
     delay(1000);
     return;
-  }
-
-  if (lastMqttConnected != mqttConnected)
-  {
-    lastMqttConnected = mqttConnected;
-    // show mqtt connection status via builtin led
-    if (mqttConnected)
-    {
-      Serial.println("MQTT connected, turning on builtin led");
-      digitalWrite(LED_BUILTIN, BUILTIN_LED_ON); // turn on led
-    }
-    else
-    {
-      Serial.println("MQTT not connected, turning off builtin led");
-      digitalWrite(LED_BUILTIN, BUILTIN_LED_OFF); // turn off led
-    }
   }
 
   if (!client.connected())
